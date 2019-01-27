@@ -1,0 +1,57 @@
+from data_utils import read_bucket_dbs
+import jieba
+import tensorflow as tf
+buckets_dir='./bucket_dbs'
+bucket_dbs=read_bucket_dbs(buckets_dir)
+
+buckets = [(5, 15),(10, 20),(15, 25),(20, 30)]
+print('共有{}个桶'.format(len(bucket_dbs)))
+'''
+共有4个桶
+'''
+bucket_sizes=[]
+for i in range(len(buckets)):
+    bucket_size=bucket_dbs[i].size
+    bucket_sizes.append(bucket_size)
+    print('bucket{}中有数据{}条'.format(i,bucket_size))
+'''
+bucket0中有数据506206条
+bucket1中有数据1091400条
+bucket2中有数据726867条
+bucket3中有数据217104条
+'''
+all_input=[]
+all_label=[]
+vocabulary=[]
+#选择第一个桶子
+bucket_db_i = bucket_dbs[0]
+for i in range(506206):
+    ask,answer = bucket_db_i.random()
+    #问句分词
+    ask=jieba.cut(ask)
+    ask=' '.join(ask)
+    all_input.append(ask)
+    #答句分词
+    answer=jieba.cut(answer)
+    answer=' '.join(answer)
+    all_label.append(answer)
+    #问句答句所有单词传进词汇表
+    answer_1=answer.split()
+    vocabulary.extend(answer_1)
+    ask_1=ask.split()
+    vocabulary.extend(ask_1)
+    
+#将问句和答句以及词汇表分别写入到3个txt文件中
+with open('train_input.txt','w') as f:
+    for i in all_input:
+        f.write(i+'\n')
+f.close()
+with open('train_output.txt','w') as f1:
+    for j in all_label:
+        f1.write(j+'\n')
+f1.close()
+vocabulary_set=list(set(vocabulary))
+with open('vocabulary.txt','w') as f2:
+    for v in vocabulary_set:
+        f2.write(v+'\n')
+f2.close()
