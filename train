@@ -1,0 +1,147 @@
+import random
+from os import path
+from tensorflow.contrib import rnn,seq2seq
+import numpy as np
+import tensorflow as tf
+
+#打开词汇表
+with open('vocabulary.txt','r+') as f3:
+    voc=f3.read()
+    vocabs=voc.splitlines()
+f3.close()
+vocab_indices=dict((c,i) for i,c in enumerate(vocabs))
+
+#将输出和输出语料及长度组装成data
+train_input_file='train_input.txt'
+train_target_file='train_output.txt'
+vocab_file='vocabulary.txt'
+batch_size=6
+end_token = '</s>'
+padding = True
+max_len = 20
+worker_size = 2
+data=[]
+with open(train_input_file,'r+') as f6:
+    input_f=f6.read()
+    input_f=input_f.splitlines()
+f6.close()
+with open(train_target_file,'r+') as f7:
+    target_f=f7.read()
+    target_f=target_f.splitlines()
+f7.close()
+for index,input_line in enumerate(input_f):
+    target_line=target_f[index]
+    input_words=[x for x in input_line.split(' ') if x != '']
+    if len(input_words) >=max_len:
+        input_words=input_words[:max_len-1]
+    input_words.append(end_token)
+    in_seq=[vocab_indices[word] for word in input_words if word in vocab_indices]
+    target_words=[x for x in target_line.split(' ') if x != '']
+    if len(target_words) >=max_len:
+        target_words=target_words[:max_len-1]
+    target_words=['<s>',]+target_words
+    target_words.append(end_token)
+    target_seq=[vocab_indices[word] for word in target_words if word in vocab_indices]
+    data.append({'in_seq':in_seq,'in_seq_len':len(in_seq),'target_seq':target_seq,'target_seq_len':len(target_seq)-1})
+
+#定义seq2seq以及attention过程
+output_dir='/Users/cl/PycharmProjects/project_one/attention1/聊天机器人BLEU/model'
+model_file = path.join(output_dir, 'model.ckpl')
+num_units = 1024
+layers = 4
+dropout = 0.2
+learning_rate=0.001
+train_in_seq = tf.placeholder(tf.int32, shape=[batch_size, None])
+train_in_seq_len = tf.placeholder(tf.int32, shape=[batch_size])
+train_target_seq = tf.placeholder(tf.int32, shape=[batch_size, None])
+train_target_seq_len = tf.placeholder(tf.int32, shape=[batch_size])
+vocabulary_size=len(vocabs)
+input_keep_prob=1
+output_keep_prob=0.8
+layer_size=4
+bi_layer_size=2
+cell_fw=rnn.MultiRNNCell([rnn.DropoutWrapper(rnn.BasicLSTMCell(num_units),input_keep_prob, output_keep_prob) for i in range(bi_layer_size)])
+cell_bw=rnn.MultiRNNCell([rnn.DropoutWrapper(rnn.BasicLSTMCell(num_units),input_keep_prob, output_keep_prob) for i in range(bi_layer_size)])
+embedding=tf.get_variable(name='embedding',shape=[vocabulary_size,num_units],dtype=tf.float32)
+embedd_input=tf.nn.embedding_lookup(params=embedding,ids=train_in_seq)
+outputs, output_states=tf.nn.bidirectional_dynamic_rnn(cell_fw=cell_fw,cell_bw=cell_bw,inputs=embedd_input,sequence_length=train_in_seq_len,dtype=embedd_input.dtype)
+encoder_outputs=tf.concat(values=outputs,axis=2)
+encoder_state = []
+for layer_id in range(bi_layer_size):
+    encoder_state.append(output_states[0][layer_id])
+    encoder_state.append(output_states[1][layer_id])
+encoder_state = tuple(encoder_state)
+attention_mechanim =seq2seq.BahdanauAttention(num_units=num_units,memory=encoder_outputs,memory_sequence_length=train_in_seq_len,normalize=True)
+cell_=rnn.MultiRNNCell([rnn.DropoutWrapper(rnn.BasicLSTMCell(num_units),input_keep_prob, output_keep_prob) for i in range(layer_size)])
+decoder_cell=seq2seq.AttentionWrapper(cell=cell_,attention_mechanism=attention_mechanim,attention_layer_size=num_units)
+init_state = decoder_cell.zero_state(batch_size, tf.float32).clone(cell_state=encoder_state)
+embed_target=tf.nn.embedding_lookup(params=embedding,ids=train_target_seq)
+helper=seq2seq.TrainingHelper(inputs=embed_target,sequence_length=train_target_seq_len)
+from tensorflow.python.layers import core as layers_core
+projection_layer=layers_core.Dense(vocabulary_size, use_bias=False)
+#组装decoder
+decoder=seq2seq.BasicDecoder(cell=decoder_cell,helper=helper,initial_state=init_state,output_layer=projection_layer)
+#动态执行decoder，得到输出的一个一个的字
+final_outputs_,final_state,final_sequence_lengths=seq2seq.dynamic_decode(decoder=decoder,maximum_iterations=100)
+final_outputs=final_outputs_.rnn_output
+#train_output_softmax = tf.argmax(tf.nn.softmax(final_outputs), 2)
+train_target_seq_=train_target_seq[:,1:]
+cost=tf.nn.sparse_softmax_cross_entropy_with_logits(labels=train_target_seq_,logits=final_outputs)
+#batch_size_ = tf.shape(train_target_seq)[0]
+loss_mask=tf.sequence_mask(lengths=train_target_seq_len,maxlen=tf.shape(final_outputs)[1])
+cost = cost * tf.to_float(loss_mask)
+loss=tf.reduce_sum(cost)/tf.to_float(batch_size)
+params = tf.trainable_variables()
+gradients = tf.gradients(loss, params)
+clipped_gradients, _ = tf.clip_by_global_norm(gradients, 0.5)
+train_op = tf.train.AdamOptimizer(learning_rate=learning_rate).apply_gradients(zip(clipped_gradients,params))
+
+#定义随机读取单条数据函数
+def read_single_data():
+    random.shuffle(data)
+    result = data[0]
+    return result
+#定义根据最长句子的长度，对较短句子的补0函数
+def padding_seq(seq):
+    results=[]
+    max_len=0
+    for s in seq:
+        if max_len<len(s):
+            max_len=len(s)
+    for i in range(0,len(seq)):
+        l=max_len-len(seq[i])
+        results.append(seq[i]+[0 for j in range(l)])
+    return results
+#组装read_single_data及padding_seq
+def read():
+    while True:
+        batch = {'in_seq': [],
+                'in_seq_len': [],
+                'target_seq': [],
+                'target_seq_len': []}
+        for i in range(0, batch_size):
+            item = read_single_data()
+            batch['in_seq'].append(item['in_seq'])
+            batch['in_seq_len'].append(item['in_seq_len'])
+            batch['target_seq'].append(item['target_seq'])
+            batch['target_seq_len'].append(item['target_seq_len'])
+            batch['in_seq'] = padding_seq(batch['in_seq'])
+            batch['target_seq'] = padding_seq(batch['target_seq'])
+        yield batch
+
+#执行并保存模型
+with tf.Session() as sess:
+    sess.run(tf.global_variables_initializer())
+    train_saver = tf.train.Saver()
+    for j in range(0,10):
+        train_data=read()
+        ba=next(train_data)
+        print(ba)
+        in_seq = ba['in_seq']
+        in_seq_len = ba['in_seq_len']
+        target_seq = ba['target_seq']
+        target_seq_len = ba['target_seq_len']
+        feed_dict = {train_in_seq:in_seq,train_in_seq_len:in_seq_len,train_target_seq:target_seq,train_target_seq_len:target_seq_len}
+        batch_CL, train_CL = sess.run([loss, train_op],feed_dict=feed_dict)
+        print(batch_CL)
+    train_saver.save(sess,model_file)
